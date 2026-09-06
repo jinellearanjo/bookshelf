@@ -136,6 +136,38 @@
     }
   };
 
+  // ---- Scroll to a TOC fragment (href="chapter.xhtml#section-2") ----
+  // Handles both id="section-2" (EPUB3-typical) and the older name="section-2"
+  // anchor style some EPUB2 books still use. Works in both page modes: in scroll
+  // mode scrollIntoView moves vertically as normal; in paginated mode the browser
+  // resolves scrollIntoView's horizontal case for a column-laid-out element too,
+  // and the explicit snap below cleans up any sub-pixel rounding so we still land
+  // exactly on a page boundary rather than half a page off.
+
+  window.__scrollToFragment = function (fragmentId) {
+    if (!fragmentId) return;
+    var el = document.getElementById(fragmentId);
+    if (!el) {
+      var named = document.getElementsByName(fragmentId);
+      if (named && named.length > 0) el = named[0];
+    }
+    if (!el) return; // id not found in this chapter -- caller falls back to top-of-chapter
+
+    el.scrollIntoView({ block: 'start', inline: 'start' });
+
+    if (isPaginated) {
+      var doc = document.documentElement;
+      var maxScroll = document.body.scrollWidth - window.innerWidth;
+      var pageIndex = pageStepPx > 0 ? Math.round(doc.scrollLeft / pageStepPx) : 0;
+      doc.scrollLeft = Math.min(pageIndex * pageStepPx, Math.max(maxScroll, 0));
+    }
+
+    // Let Kotlin know where we actually ended up, so it's saved as the chapter's
+    // progress -- otherwise the next unrelated reload (e.g. a font-size change)
+    // would restore to wherever progress last pointed, undoing this jump.
+    reportProgress();
+  };
+
   // ---- Highlight rendering ----
   // Wraps [startOffset, endOffset) of body.innerText in a <mark> with the given color.
   // Applied for every saved highlight on chapter load, and immediately after a new one is made.
@@ -192,4 +224,17 @@
       window.AndroidBridge.onHighlightTapped(mark.dataset.highlightId);
     }
   });
+
+  // Removes a single highlight's <mark> wrapper (unwrapping its text back into the
+  // surrounding content) without touching anything else -- used when a highlight is
+  // deleted but the chapter itself doesn't need a full reload.
+  window.__removeHighlight = function (highlightId) {
+    var mark = document.querySelector('mark[data-highlight-id="' + highlightId + '"]');
+    if (!mark) return;
+    var parent = mark.parentNode;
+    if (!parent) return;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    parent.removeChild(mark);
+    parent.normalize();
+  };
 })();
