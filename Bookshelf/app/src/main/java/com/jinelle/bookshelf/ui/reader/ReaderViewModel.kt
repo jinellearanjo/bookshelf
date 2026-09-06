@@ -29,7 +29,11 @@ data class ReaderUiState(
     val initialScrollPercent: Float = 0f,
     val isLoading: Boolean = true,
     // non-null while the highlight/note popup should be shown for a pending selection
-    val pendingSelection: PendingSelection? = null
+    val pendingSelection: PendingSelection? = null,
+    // non-null once, right after a TOC tap on an in-chapter anchor -- ReaderWebView
+    // consumes it (scrolls to the anchor) and calls consumeFragmentJump() to clear it,
+    // so it doesn't get re-applied on the next unrelated reload (e.g. a font change).
+    val pendingFragmentId: String? = null
 )
 
 data class PendingSelection(val start: Int, val end: Int, val text: String)
@@ -78,7 +82,12 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun loadChapter(index: Int) {
+    /**
+     * Loads a chapter. [fragment], when non-null, is an in-chapter anchor id from a TOC
+     * entry like "chapter3.xhtml#section-2" -- it takes priority over scroll-percent-based
+     * restoration for this one load (see ReaderWebView's onPageFinished ordering).
+     */
+    fun loadChapter(index: Int, fragment: String? = null) {
         val book = _uiState.value.book ?: return
         val uri = bookUri ?: return
         if (index < 0 || index >= book.chapters.size) return
@@ -90,7 +99,8 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 chapterIndex = index,
                 chapterHtml = html,
                 highlights = highlights,
-                initialScrollPercent = if (index == _uiState.value.chapterIndex) lastScrollPercent else 0f
+                initialScrollPercent = if (index == _uiState.value.chapterIndex) lastScrollPercent else 0f,
+                pendingFragmentId = fragment
             )
         }
     }
@@ -100,15 +110,26 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     fun jumpToHref(href: String) {
         val book = _uiState.value.book ?: return
-        // Strip any #fragment for chapter matching -- fragment-level scroll is a
-        // reasonable v2 addition (would need reader.js to scrollIntoView by id).
         val path = href.substringBefore("#")
+        val rawFragment = href.substringAfter("#", "")
+        // TOC hrefs can carry percent-encoded fragments (rare, but EPUB doesn't forbid it) --
+        // decode before handing to reader.js, which matches against the raw HTML id attribute.
+        val fragment = rawFragment.ifEmpty { null }?.let { Uri.decode(it) }
         val index = book.chapters.indexOfFirst { it.href == path }
-        if (index != -1) loadChapter(index)
+        if (index != -1) loadChapter(index, fragment)
+    }
+
+    /** Called by ReaderWebView once it has applied (or given up trying to apply) a pending fragment scroll. */
+    fun consumeFragmentJump() {
+        _uiState.value = _uiState.value.copy(pendingFragmentId = null)
     }
 
     fun onScrollProgress(percent: Float) {
         lastScrollPercent = percent
+        // Keep this live (not just in the DB) so any reload triggered by something unrelated --
+        // a font-size change, a theme swap -- restores to where the person actually is, not
+        // wherever they happened to be when the chapter was first loaded.
+        _uiState.value = _uiState.value.copy(initialScrollPercent = percent)
         viewModelScope.launch {
             db.progressDao().upsert(
                 ProgressEntity(
