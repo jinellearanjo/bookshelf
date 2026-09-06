@@ -9,10 +9,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.viewinterop.AndroidView
@@ -27,6 +28,14 @@ private const val PAGINATION_MARGIN_PX = 16
  * Renders one chapter's HTML. Owns the WebView instance (kept alive across recompositions
  * via `remember`) plus the invisible tap zones for page/chapter turning, since both need
  * direct access to the same WebView to call reader.js's pagination functions.
+ *
+ * Important: the WebView is only reloaded (loadDataWithBaseURL) when the actual page
+ * content/styling changes (chapterHtml, settings, or pageMode) -- see `loadedContentKey`
+ * below. Without that check, ANY recomposition (including the live scroll-progress
+ * updates that fire every ~200ms while reading, or a highlight being added) would
+ * trigger a full page reload, which would be visibly janky and would fight with the
+ * user's actual scroll position. Highlight changes and fragment jumps that happen
+ * without a reload are instead applied directly via evaluateJavascript.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -36,23 +45,40 @@ fun ReaderWebView(
     pageMode: PageMode,
     highlights: List<HighlightEntity>,
     initialScrollPercent: Float,
+    targetFragmentId: String?,
     onTextSelected: (start: Int, end: Int, text: String) -> Unit,
     onScrollProgress: (percent: Float) -> Unit,
     onHighlightTapped: (highlightId: String) -> Unit,
     onRequestNextChapter: () -> Unit,
     onRequestPrevChapter: () -> Unit,
+    onFragmentConsumed: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
 
+    // Tracks the (content, settings, pageMode) triple that's currently actually loaded in
+    // the WebView, so `update` can tell "does this recomposition need a real reload" from
+    // "just some unrelated state changed."
+    val loadedContentKey = remember { mutableStateOf<Triple<String, ReaderSettings, PageMode>?>(null) }
+    // Highlight ids currently rendered as <mark> elements in the live DOM -- diffed against
+    // the latest `highlights` list on every no-reload update so additions/deletions still
+    // show up immediately without needing a full page reload.
+    val appliedHighlightIds = remember { mutableStateOf<Set<Long>>(emptySet()) }
+
     // WebViewClient/JsBridge are created once (in factory), but chapter/highlights/scroll/
-    // pageMode change on every recomposition -- a plain closure over those params would only
-    // ever see the FIRST composition's values inside onPageFinished. Route through a mutable
-    // holder that `update` refreshes before every load, so onPageFinished always reads current data.
+    // pageMode/fragment change on every recomposition -- a plain closure over those params
+    // would only ever see the FIRST composition's values inside onPageFinished. Route through
+    // a mutable holder that's refreshed before every load, so onPageFinished always reads
+    // current data.
     val pendingApplyData = remember { PendingApplyDataHolder() }
     pendingApplyData.highlights = highlights
     pendingApplyData.initialScrollPercent = initialScrollPercent
     pendingApplyData.pageMode = pageMode
+    pendingApplyData.targetFragmentId = targetFragmentId
+
+    // onFragmentConsumed is called from inside the WebViewClient (created once), so it needs
+    // rememberUpdatedState to always invoke the latest lambda rather than the first composition's.
+    val currentOnFragmentConsumed by rememberUpdatedState(onFragmentConsumed)
 
     val bridge = remember {
         JsBridge(
@@ -89,26 +115,68 @@ fun ReaderWebView(
                                     null
                                 )
                             }
-                            view.evaluateJavascript(
-                                "window.__restoreScroll(${pendingApplyData.initialScrollPercent});",
-                                null
-                            )
+                            appliedHighlightIds.value = pendingApplyData.highlights.map { it.id }.toSet()
+
+                            val fragment = pendingApplyData.targetFragmentId
+                            if (fragment != null) {
+                                view.evaluateJavascript(
+                                    "window.__scrollToFragment('${escapeJsString(fragment)}');", null
+                                )
+                                currentOnFragmentConsumed()
+                            } else {
+                                view.evaluateJavascript(
+                                    "window.__restoreScroll(${pendingApplyData.initialScrollPercent});",
+                                    null
+                                )
+                            }
                         }
                     }
                     webViewRef.value = this
                 }
             },
             update = { view ->
-                val styleTag = CssInjector.buildFullStyleTag(settings)
-                val readerJsTag = "<script src=\"file:///android_asset/reader.js\"></script>"
-                val fullHtml = injectIntoHead(chapterHtml, styleTag + readerJsTag)
-                view.loadDataWithBaseURL(
-                    "file:///android_asset/",
-                    fullHtml,
-                    "text/html",
-                    "utf-8",
-                    null
-                )
+                val key = Triple(chapterHtml, settings, pageMode)
+                if (loadedContentKey.value != key) {
+                    // Real reload needed -- onPageFinished (above) will apply highlights,
+                    // pagination, and scroll/fragment restoration once the new page is ready.
+                    loadedContentKey.value = key
+                    appliedHighlightIds.value = emptySet()
+                    val styleTag = CssInjector.buildFullStyleTag(settings)
+                    val readerJsTag = "<script src=\"file:///android_asset/reader.js\"></script>"
+                    val fullHtml = injectIntoHead(chapterHtml, styleTag + readerJsTag)
+                    view.loadDataWithBaseURL(
+                        "file:///android_asset/",
+                        fullHtml,
+                        "text/html",
+                        "utf-8",
+                        null
+                    )
+                } else {
+                    // Same page still loaded -- apply changes directly instead of reloading.
+                    val currentIds = highlights.map { it.id }.toSet()
+                    val previouslyApplied = appliedHighlightIds.value
+                    for (h in highlights) {
+                        if (h.id !in previouslyApplied) {
+                            view.evaluateJavascript(
+                                "window.__applyHighlight(${h.startOffset}, ${h.endOffset}, '${h.color}', '${h.id}');",
+                                null
+                            )
+                        }
+                    }
+                    for (removedId in previouslyApplied - currentIds) {
+                        view.evaluateJavascript("window.__removeHighlight('$removedId');", null)
+                    }
+                    appliedHighlightIds.value = currentIds
+
+                    // A TOC tap landed on an anchor within the chapter that's already showing --
+                    // no reload needed, just scroll straight there.
+                    if (targetFragmentId != null) {
+                        view.evaluateJavascript(
+                            "window.__scrollToFragment('${escapeJsString(targetFragmentId)}');", null
+                        )
+                        onFragmentConsumed()
+                    }
+                }
             }
         )
 
@@ -153,6 +221,7 @@ private class PendingApplyDataHolder {
     var highlights: List<HighlightEntity> = emptyList()
     var initialScrollPercent: Float = 0f
     var pageMode: PageMode = PageMode.SCROLL
+    var targetFragmentId: String? = null
 }
 
 /** Inserts [content] just before </head>, or at the very start if the chapter has no <head>. */
@@ -164,3 +233,6 @@ private fun injectIntoHead(html: String, content: String): String {
         content + html
     }
 }
+
+/** Escapes a string for safe interpolation inside a single-quoted JS string literal. */
+private fun escapeJsString(s: String): String = s.replace("\\", "\\\\").replace("'", "\\'")
