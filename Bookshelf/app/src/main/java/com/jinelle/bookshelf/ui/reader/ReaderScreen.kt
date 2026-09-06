@@ -66,13 +66,15 @@ fun ReaderScreen(
                     pageMode = state.pageMode,
                     highlights = state.highlights,
                     initialScrollPercent = state.initialScrollPercent,
+                    targetFragmentId = state.pendingFragmentId,
                     onTextSelected = viewModel::onTextSelected,
                     onScrollProgress = viewModel::onScrollProgress,
                     onHighlightTapped = { id ->
                         state.highlights.find { it.id.toString() == id }?.let { viewModel.deleteHighlight(it) }
                     },
                     onRequestNextChapter = viewModel::nextChapter,
-                    onRequestPrevChapter = viewModel::previousChapter
+                    onRequestPrevChapter = viewModel::previousChapter,
+                    onFragmentConsumed = viewModel::consumeFragmentJump
                 )
             }
         }
