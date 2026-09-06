@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.Bookshelf" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#EDE9DA</item>
+    </style>
+</resources>

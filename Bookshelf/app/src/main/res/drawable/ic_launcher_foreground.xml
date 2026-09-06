@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Simple open-book glyph, sized within the adaptive-icon safe zone. -->
+    <path
+        android:fillColor="#F4ECD8"
+        android:pathData="M54,34 C48,29 36,26 26,27 L26,74 C36,73 48,76 54,81 C60,76 72,73 82,74 L82,27 C72,26 60,29 54,34 Z" />
+    <path
+        android:fillColor="#3D2B1F"
+        android:pathData="M54,34 L54,81 L52,81 L52,34 Z" />
+</vector>
